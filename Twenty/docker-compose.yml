@@ -1,0 +1,99 @@
+services:
+  twenty-db:
+    image: postgres:16
+    container_name: twenty-db
+    restart: always
+    networks:
+      twenty-net:
+        ipv4_address: 172.32.0.2
+    volumes:
+      - ./storage/db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${PG_DATABASE_NAME:-twenty}
+      POSTGRES_USER: ${PG_DATABASE_USER:-twenty}
+      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_DATABASE_USER:-twenty}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  twenty-redis:
+    image: redis:7-alpine
+    container_name: twenty-redis
+    restart: always
+    networks:
+      twenty-net:
+        ipv4_address: 172.32.0.3
+    command: --maxmemory-policy noeviction
+    volumes:
+      - ./storage/redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  twenty-server:
+    image: twentycrm/twenty:${TAG:-v1.18.1}
+    container_name: twenty-server
+    restart: always
+    networks:
+      twenty-net:
+        ipv4_address: 172.32.0.4
+    ports:
+      - "${TWENTY_PORT:-8092}:3000"
+    volumes:
+      - ./storage/server-data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      twenty-db:
+        condition: service_healthy
+      twenty-redis:
+        condition: service_healthy
+    environment:
+      SERVER_URL: ${SERVER_URL}
+      APP_SECRET: ${APP_SECRET}
+      PG_DATABASE_URL: postgresql://${PG_DATABASE_USER:-twenty}:${PG_DATABASE_PASSWORD}@twenty-db:5432/${PG_DATABASE_NAME:-twenty}
+      REDIS_URL: redis://twenty-redis:6379
+      STORAGE_TYPE: local
+      SERVERLESS_TYPE: DISABLED
+      DISABLE_DB_MIGRATIONS: "false"
+      DISABLE_CRON_JOBS_REGISTRATION: "false"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  twenty-worker:
+    image: twentycrm/twenty:${TAG:-v1.18.1}
+    container_name: twenty-worker
+    restart: always
+    command: yarn worker:prod
+    networks:
+      twenty-net:
+        ipv4_address: 172.32.0.5
+    volumes:
+      - ./storage/server-data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      twenty-db:
+        condition: service_healthy
+      twenty-server:
+        condition: service_healthy
+    environment:
+      SERVER_URL: ${SERVER_URL}
+      APP_SECRET: ${APP_SECRET}
+      PG_DATABASE_URL: postgresql://${PG_DATABASE_USER:-twenty}:${PG_DATABASE_PASSWORD}@twenty-db:5432/${PG_DATABASE_NAME:-twenty}
+      REDIS_URL: redis://twenty-redis:6379
+      STORAGE_TYPE: local
+      SERVERLESS_TYPE: DISABLED
+      DISABLE_DB_MIGRATIONS: "true"
+      DISABLE_CRON_JOBS_REGISTRATION: "true"
+
+networks:
+  twenty-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.32.0.0/24
