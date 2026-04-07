@@ -1,0 +1,257 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: paperclip
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paperclip-data
+  namespace: paperclip
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: unraid-nfs
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: norda-workspace-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - nfsvers=4.1
+  nfs:
+    server: 10.200.0.2
+    path: /mnt/user/norda-workspace
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: norda-workspace
+  namespace: paperclip
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: norda-workspace-pv
+  resources:
+    requests:
+      storage: 500Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: onedrive-auth
+  namespace: paperclip
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: unraid-nfs
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: onedrive-config
+  namespace: paperclip
+data:
+  config: |
+    sync_dir = "/onedrive/data"
+    skip_symlinks = "true"
+    monitor_interval = "300"
+    skip_dotfiles = "false"
+    application_id = "b74de450-c882-49ad-93f6-3f9d66dd0c13"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: paperclip-secrets
+  namespace: paperclip
+type: Opaque
+stringData:
+  BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET}"
+  DATABASE_URL: "${DATABASE_URL}"
+  POSTGRES_USER: "${POSTGRES_USER}"
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+  POSTGRES_DB: "${POSTGRES_DB}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paperclip
+  namespace: paperclip
+  labels:
+    app: paperclip
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: paperclip
+  template:
+    metadata:
+      labels:
+        app: paperclip
+    spec:
+      initContainers:
+        - name: init-pgdata
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /paperclip/pgdata /paperclip/instances/default/logs /workspace/OneDrive && chown -R 999:999 /paperclip/pgdata && chown 1000:1000 /paperclip && find /paperclip -mindepth 1 -maxdepth 1 ! -name pgdata -exec chown -R 1000:1000 {} + && chown -R 1000:1000 /workspace"]
+          volumeMounts:
+            - name: data
+              mountPath: /paperclip
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: paperclip-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: paperclip-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: paperclip-secrets
+                  key: POSTGRES_DB
+            - name: PGDATA
+              value: /paperclip/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /paperclip
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "paperclip", "-d", "paperclip"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        - name: paperclip
+          image: ghcr.io/paperclipai/paperclip:latest
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: paperclip-secrets
+                  key: DATABASE_URL
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: paperclip-secrets
+                  key: BETTER_AUTH_SECRET
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3100"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: SERVE_UI
+              value: "true"
+            - name: PAPERCLIP_HOME
+              value: "/paperclip"
+            - name: PAPERCLIP_INSTANCE_ID
+              value: "default"
+            - name: PAPERCLIP_CONFIG
+              value: "/paperclip/instances/default/config.json"
+            - name: PAPERCLIP_DEPLOYMENT_MODE
+              value: "authenticated"
+            - name: PAPERCLIP_DEPLOYMENT_EXPOSURE
+              value: "private"
+            - name: PAPERCLIP_AUTH_DISABLE_SIGN_UP
+              value: "false"
+            - name: PAPERCLIP_PUBLIC_URL
+              value: "https://paperclip.lab.2slow.ca"
+          ports:
+            - containerPort: 3100
+          volumeMounts:
+            - name: data
+              mountPath: /paperclip
+            - name: workspace
+              mountPath: /workspace
+          readinessProbe:
+            tcpSocket:
+              port: 3100
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+        - name: onedrive
+          image: driveone/onedrive:latest
+          env:
+            - name: ONEDRIVE_UID
+              value: "1000"
+            - name: ONEDRIVE_GID
+              value: "1000"
+          volumeMounts:
+            - name: onedrive-auth
+              mountPath: /onedrive/conf
+            - name: workspace
+              mountPath: /onedrive/data
+              subPath: OneDrive
+            - name: onedrive-config
+              mountPath: /onedrive/conf/config
+              subPath: config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: paperclip-data
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: norda-workspace
+        - name: onedrive-auth
+          persistentVolumeClaim:
+            claimName: onedrive-auth
+        - name: onedrive-config
+          configMap:
+            name: onedrive-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paperclip
+  namespace: paperclip
+spec:
+  selector:
+    app: paperclip
+  ports:
+    - port: 80
+      targetPort: 3100
+      protocol: TCP

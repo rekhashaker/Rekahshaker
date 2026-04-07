@@ -1,0 +1,64 @@
+# Traefik Helm Values
+# Cluster: homelab k3s | Updated: April 2026
+
+deployment:
+  replicas: 1
+
+service:
+  type: LoadBalancer
+
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    protocol: TCP
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    port: 8443
+    exposedPort: 443
+    protocol: TCP
+    http:
+      tls:
+        enabled: true
+
+# Use wildcard cert from cert-manager
+tlsStore:
+  default:
+    defaultCertificate:
+      secretName: wildcard-lab-2slow-ca-tls
+
+ingressRoute:
+  dashboard:
+    enabled: true
+    entryPoints: ["websecure"]
+
+# No ACME — cert-manager handles certs
+persistence:
+  enabled: false
+
+rbac:
+  enabled: true
+
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+
+additionalArguments:
+  - "--api.dashboard=true"
+  - "--api.insecure=false"
+  - "--providers.kubernetesingress.ingressclass=traefik"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
